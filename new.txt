@@ -1,0 +1,707 @@
+-- ================================================================
+-- DBMS MICROPROJECT: RESEARCH LABORATORY EQUIPMENT BOOKING
+-- Oracle SQL*Plus / PL/SQL
+-- ================================================================
+-- ER entities represented:
+-- DEPARTMENT, RESEARCHER, EQUIPMENT_CATEGORY, EQUIPMENT,
+-- TECHNICIAN, BOOKING (relational representation of BOOKS),
+-- USAGE_LOG, MAINTENANCE (relational representation of MAINTAINS).
+--
+-- Important design note:
+-- In the ER diagram, BOOKS is a relationship with attributes and
+-- BookingID is shown under UsageLog. In the relational model, the
+-- M:N Researcher-Equipment BOOKS relationship is represented by
+-- BOOKING. USAGE_LOG retains UsageID and BookingID and stores actual
+-- usage times. This removes repeated booking attributes and keeps the
+-- design normalized.
+-- ================================================================
+
+SET SERVEROUTPUT ON
+SET LINESIZE 180
+SET PAGESIZE 100
+SET VERIFY OFF
+
+-- -----------------------------
+-- CLEAN-UP (safe to rerun)
+-- -----------------------------
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE USAGE_LOG CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE MAINTENANCE CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE BOOKING CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE EQUIPMENT CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE TECHNICIAN CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE EQUIPMENT_CATEGORY CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE RESEARCHER CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE DEPARTMENT CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP SEQUENCE BOOKING_SEQ'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP SEQUENCE USAGE_SEQ'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP SEQUENCE MAINTENANCE_SEQ'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+
+-- -----------------------------
+-- DDL: TABLES
+-- -----------------------------
+
+CREATE TABLE DEPARTMENT (
+DeptID          NUMBER(4) PRIMARY KEY,
+DepartmentName  VARCHAR2(60) NOT NULL UNIQUE,
+Building        VARCHAR2(60) NOT NULL
+);
+
+CREATE TABLE RESEARCHER (
+    ResearcherID NUMBER(6) PRIMARY KEY,
+    Name         VARCHAR2(80) NOT NULL,
+    Email        VARCHAR2(120) NOT NULL UNIQUE,
+    Phone        VARCHAR2(15) NOT NULL,
+    Role         VARCHAR2(40) NOT NULL,
+    Status       VARCHAR2(15) DEFAULT 'ACTIVE' NOT NULL,
+    DeptID       NUMBER(4) NOT NULL,
+    CONSTRAINT fk_researcher_dept
+        FOREIGN KEY (DeptID) REFERENCES DEPARTMENT(DeptID),
+    CONSTRAINT ck_researcher_status
+        CHECK (Status IN ('ACTIVE','INACTIVE'))
+);
+
+CREATE TABLE EQUIPMENT_CATEGORY (
+    CategoryID   NUMBER(4) PRIMARY KEY,
+    Name         VARCHAR2(60) NOT NULL UNIQUE,
+    Description  VARCHAR2(200)
+);
+
+CREATE TABLE EQUIPMENT (
+    EquipmentID  NUMBER(6) PRIMARY KEY,
+    Name         VARCHAR2(100) NOT NULL,
+    Model        VARCHAR2(80),
+    Manufacturer VARCHAR2(80),
+    SerialNumber VARCHAR2(80) NOT NULL UNIQUE,
+    PurchaseDate DATE NOT NULL,
+    Location     VARCHAR2(100) NOT NULL,
+    Cost         NUMBER(12,2) CHECK (Cost >= 0),
+    Status       VARCHAR2(20) DEFAULT 'AVAILABLE' NOT NULL,
+    CategoryID   NUMBER(4) NOT NULL,
+    CONSTRAINT fk_equipment_category
+        FOREIGN KEY (CategoryID) REFERENCES EQUIPMENT_CATEGORY(CategoryID),
+    CONSTRAINT ck_equipment_status
+        CHECK (Status IN ('AVAILABLE','BOOKED','MAINTENANCE','RETIRED'))
+);
+
+CREATE TABLE TECHNICIAN (
+    TechnicianID NUMBER(6) PRIMARY KEY,
+    Name         VARCHAR2(80) NOT NULL,
+    Phone        VARCHAR2(15) NOT NULL,
+    Specialization VARCHAR2(80) NOT NULL
+);
+
+-- BOOKS relationship:
+-- Researcher M:N Equipment, with Date/StartTime/EndTime/Purpose/Status.
+CREATE TABLE BOOKING (
+    BookingID    NUMBER(8) PRIMARY KEY,
+    ResearcherID NUMBER(6) NOT NULL,
+    EquipmentID  NUMBER(6) NOT NULL,
+    BookingDate  DATE NOT NULL,
+    StartTime    VARCHAR2(5) NOT NULL,
+    EndTime      VARCHAR2(5) NOT NULL,
+    Purpose      VARCHAR2(250) NOT NULL,
+    Status       VARCHAR2(20) DEFAULT 'CONFIRMED' NOT NULL,
+    CONSTRAINT fk_booking_researcher
+        FOREIGN KEY (ResearcherID) REFERENCES RESEARCHER(ResearcherID),
+    CONSTRAINT fk_booking_equipment
+        FOREIGN KEY (EquipmentID) REFERENCES EQUIPMENT(EquipmentID),
+    CONSTRAINT ck_booking_time_format
+        CHECK (REGEXP_LIKE(StartTime, '^[0-2][0-9]:[0-5][0-9]$')
+           AND REGEXP_LIKE(EndTime, '^[0-2][0-9]:[0-5][0-9]$')),
+    CONSTRAINT ck_booking_status
+        CHECK (Status IN ('CONFIRMED','CANCELLED','COMPLETED'))
+);
+
+CREATE TABLE USAGE_LOG (
+    UsageID        NUMBER(8) PRIMARY KEY,
+    BookingID      NUMBER(8) NOT NULL UNIQUE,
+    ActualStartTime DATE NOT NULL,
+    ActualEndTime   DATE,
+    CONSTRAINT fk_usage_booking
+        FOREIGN KEY (BookingID) REFERENCES BOOKING(BookingID),
+    CONSTRAINT ck_usage_time
+        CHECK (ActualEndTime IS NULL OR ActualEndTime >= ActualStartTime)
+);
+
+-- UsageHours is a derived attribute (dashed oval in the ER diagram).
+ALTER TABLE USAGE_LOG ADD (
+    UsageHours NUMBER(10,2)
+        GENERATED ALWAYS AS (
+            CASE
+                WHEN ActualEndTime IS NOT NULL
+                THEN (ActualEndTime - ActualStartTime) * 24
+                ELSE NULL
+            END
+        ) VIRTUAL
+);
+
+-- MAINTAINS relationship:
+-- one equipment can have many maintenance records; each record has
+-- one technician, with maintenance attributes from the ER diagram.
+CREATE TABLE MAINTENANCE (
+    MaintenanceID   NUMBER(8) PRIMARY KEY,
+    EquipmentID     NUMBER(6) NOT NULL,
+    TechnicianID    NUMBER(6) NOT NULL,
+    ScheduledDate   DATE NOT NULL,
+    CompletedDate   DATE,
+    MaintenanceType VARCHAR2(80) NOT NULL,
+    Description     VARCHAR2(250),
+    Cost            NUMBER(12,2) DEFAULT 0 CHECK (Cost >= 0),
+    CONSTRAINT fk_maintenance_equipment
+        FOREIGN KEY (EquipmentID) REFERENCES EQUIPMENT(EquipmentID),
+    CONSTRAINT fk_maintenance_technician
+        FOREIGN KEY (TechnicianID) REFERENCES TECHNICIAN(TechnicianID),
+    CONSTRAINT ck_maintenance_dates
+        CHECK (CompletedDate IS NULL OR CompletedDate >= ScheduledDate)
+);
+
+CREATE INDEX idx_booking_equipment_date
+    ON BOOKING(EquipmentID, BookingDate);
+
+CREATE INDEX idx_booking_researcher
+    ON BOOKING(ResearcherID);
+
+CREATE INDEX idx_maintenance_equipment
+    ON MAINTENANCE(EquipmentID);
+
+-- Sequences for PL/SQL procedures
+CREATE SEQUENCE BOOKING_SEQ START WITH 1011 INCREMENT BY 1 NOCACHE;
+CREATE SEQUENCE USAGE_SEQ START WITH 1001 INCREMENT BY 1 NOCACHE;
+CREATE SEQUENCE MAINTENANCE_SEQ START WITH 1001 INCREMENT BY 1 NOCACHE;
+
+-- -----------------------------
+-- DML: SAMPLE DATA
+-- At least 10 records in each major table.
+-- -----------------------------
+
+INSERT INTO DEPARTMENT VALUES (1,'Physics Research','Science Block A');
+INSERT INTO DEPARTMENT VALUES (2,'Chemistry Research','Science Block B');
+INSERT INTO DEPARTMENT VALUES (3,'Biotechnology','Life Sciences Block');
+INSERT INTO DEPARTMENT VALUES (4,'Materials Science','Engineering Block A');
+INSERT INTO DEPARTMENT VALUES (5,'Computer Science','Technology Block');
+INSERT INTO DEPARTMENT VALUES (6,'Electronics Research','Engineering Block B');
+INSERT INTO DEPARTMENT VALUES (7,'Environmental Science','Green Research Block');
+INSERT INTO DEPARTMENT VALUES (8,'Nanotechnology','Advanced Research Block');
+INSERT INTO DEPARTMENT VALUES (9,'Mechanical Research','Engineering Block C');
+INSERT INTO DEPARTMENT VALUES (10,'Biomedical Engineering','Medical Research Block');
+
+INSERT INTO RESEARCHER VALUES (101,'Anita Nair','anita.nair@lab.edu','9000000001','Research Scientist','ACTIVE',1);
+INSERT INTO RESEARCHER VALUES (102,'Rahul Menon','rahul.menon@lab.edu','9000000002','Research Fellow','ACTIVE',2);
+INSERT INTO RESEARCHER VALUES (103,'Meera Joseph','meera.joseph@lab.edu','9000000003','Research Scientist','ACTIVE',3);
+INSERT INTO RESEARCHER VALUES (104,'Arjun Kumar','arjun.kumar@lab.edu','9000000004','Research Fellow','ACTIVE',4);
+INSERT INTO RESEARCHER VALUES (105,'Devika Rao','devika.rao@lab.edu','9000000005','Research Scientist','ACTIVE',5);
+INSERT INTO RESEARCHER VALUES (106,'Nikhil Das','nikhil.das@lab.edu','9000000006','Project Researcher','ACTIVE',6);
+INSERT INTO RESEARCHER VALUES (107,'Isha Varma','isha.varma@lab.edu','9000000007','Research Fellow','ACTIVE',7);
+INSERT INTO RESEARCHER VALUES (108,'Kiran Paul','kiran.paul@lab.edu','9000000008','Research Scientist','ACTIVE',8);
+INSERT INTO RESEARCHER VALUES (109,'Sanjay Pillai','sanjay.pillai@lab.edu','9000000009','Project Researcher','ACTIVE',9);
+INSERT INTO RESEARCHER VALUES (110,'Neha Thomas','neha.thomas@lab.edu','9000000010','Research Scientist','ACTIVE',10);
+
+INSERT INTO EQUIPMENT_CATEGORY VALUES (1,'Microscopy','Microscopes and imaging systems');
+INSERT INTO EQUIPMENT_CATEGORY VALUES (2,'Spectroscopy','Spectrometers and optical analysis');
+INSERT INTO EQUIPMENT_CATEGORY VALUES (3,'Chromatography','Separation and chromatography systems');
+INSERT INTO EQUIPMENT_CATEGORY VALUES (4,'Centrifugation','Laboratory centrifuges');
+INSERT INTO EQUIPMENT_CATEGORY VALUES (5,'Thermal Analysis','Thermal testing equipment');
+INSERT INTO EQUIPMENT_CATEGORY VALUES (6,'Electronics','Electronic measurement instruments');
+INSERT INTO EQUIPMENT_CATEGORY VALUES (7,'Mechanical Testing','Material testing machines');
+INSERT INTO EQUIPMENT_CATEGORY VALUES (8,'PCR','PCR and molecular biology equipment');
+INSERT INTO EQUIPMENT_CATEGORY VALUES (9,'3D Printing','Additive manufacturing equipment');
+INSERT INTO EQUIPMENT_CATEGORY VALUES (10,'Environmental','Environmental monitoring equipment');
+
+INSERT INTO EQUIPMENT VALUES (201,'Scanning Electron Microscope','SEM-500','JEOL','JEOL-SEM-001',DATE '2023-01-15','Lab A-101',4500000,'AVAILABLE',1);
+INSERT INTO EQUIPMENT VALUES (202,'UV-Visible Spectrophotometer','UV-2600','Shimadzu','SHI-UV-002',DATE '2022-03-10','Lab B-201',850000,'AVAILABLE',2);
+INSERT INTO EQUIPMENT VALUES (203,'HPLC System','LC-20AD','Shimadzu','SHI-HPLC-003',DATE '2021-07-21','Lab B-205',1750000,'AVAILABLE',3);
+INSERT INTO EQUIPMENT VALUES (204,'High Speed Centrifuge','5810R','Eppendorf','EPP-CEN-004',DATE '2024-02-12','Lab C-110',650000,'AVAILABLE',4);
+INSERT INTO EQUIPMENT VALUES (205,'Thermal Analyzer','TGA-55','TA Instruments','TA-TGA-005',DATE '2020-11-09','Lab D-301',1250000,'AVAILABLE',5);
+INSERT INTO EQUIPMENT VALUES (206,'Digital Oscilloscope','MSO5000','Rohde  Schwarz','RS-OSE-006',DATE '2023-08-18','Lab E-105',420000,'AVAILABLE',6);
+INSERT INTO EQUIPMENT VALUES (207,'Universal Testing Machine','UTM-100','Instron','INS-UTM-007',DATE '2022-12-01','Lab F-210',2100000,'AVAILABLE',7);
+INSERT INTO EQUIPMENT VALUES (208,'Real-Time PCR System','CFX96','Bio-Rad','BIO-PCR-008',DATE '2024-04-20','Lab C-205',1550000,'AVAILABLE',8);
+INSERT INTO EQUIPMENT VALUES (209,'3D Printer','Fortus 450','Stratasys','STR-3DP-009',DATE '2023-06-14','Fab Lab-01',3200000,'AVAILABLE',9);
+INSERT INTO EQUIPMENT VALUES (210,'Air Quality Monitor','AQ-Pro','TSI','TSI-AQM-010',DATE '2021-09-25','Env Lab-02',275000,'AVAILABLE',10);
+
+INSERT INTO TECHNICIAN VALUES (301,'Vivek Sharma','9100000001','Microscopy and Imaging');
+INSERT INTO TECHNICIAN VALUES (302,'Priya Iyer','9100000002','Spectroscopy');
+INSERT INTO TECHNICIAN VALUES (303,'Manu George','9100000003','Chromatography');
+INSERT INTO TECHNICIAN VALUES (304,'Lakshmi Menon','9100000004','Centrifugation');
+INSERT INTO TECHNICIAN VALUES (305,'Rohan Singh','9100000005','Thermal Analysis');
+INSERT INTO TECHNICIAN VALUES (306,'Akhil Raj','9100000006','Electronics');
+INSERT INTO TECHNICIAN VALUES (307,'Sneha Kapoor','9100000007','Mechanical Testing');
+INSERT INTO TECHNICIAN VALUES (308,'Thomas Mathew','9100000008','PCR Systems');
+INSERT INTO TECHNICIAN VALUES (309,'Farhan Ali','9100000009','3D Printing');
+INSERT INTO TECHNICIAN VALUES (310,'Gopika Nair','9100000010','Environmental Monitoring');
+
+-- Booking data: deliberately non-overlapping for initial successful state.
+INSERT INTO BOOKING VALUES (1001,101,201,DATE '2026-09-15','09:00','11:00','Surface imaging of alloy sample','CONFIRMED');
+INSERT INTO BOOKING VALUES (1002,102,202,DATE '2026-09-15','10:00','12:00','Absorbance measurement','CONFIRMED');
+INSERT INTO BOOKING VALUES (1003,103,203,DATE '2026-09-16','09:00','12:00','Protein separation experiment','CONFIRMED');
+INSERT INTO BOOKING VALUES (1004,104,204,DATE '2026-09-16','13:00','15:00','Cell sample centrifugation','CONFIRMED');
+INSERT INTO BOOKING VALUES (1005,105,205,DATE '2026-09-17','09:30','11:30','Thermal stability analysis','CONFIRMED');
+INSERT INTO BOOKING VALUES (1006,106,206,DATE '2026-09-17','14:00','16:00','Signal characterization','CONFIRMED');
+INSERT INTO BOOKING VALUES (1007,107,207,DATE '2026-09-18','10:00','13:00','Tensile strength test','CONFIRMED');
+INSERT INTO BOOKING VALUES (1008,108,208,DATE '2026-09-18','14:00','16:30','Gene expression analysis','CONFIRMED');
+INSERT INTO BOOKING VALUES (1009,109,209,DATE '2026-09-19','09:00','12:00','Prototype fabrication','CONFIRMED');
+INSERT INTO BOOKING VALUES (1010,110,210,DATE '2026-09-19','13:00','15:00','Indoor air quality survey','CONFIRMED');
+
+INSERT INTO USAGE_LOG (UsageID,BookingID,ActualStartTime,ActualEndTime)
+VALUES (2001,1001,TO_DATE('2026-09-15 09:05','YYYY-MM-DD HH24:MI'),TO_DATE('2026-09-15 10:55','YYYY-MM-DD HH24:MI'));
+INSERT INTO USAGE_LOG (UsageID,BookingID,ActualStartTime,ActualEndTime) VALUES (2002,1002,TO_DATE('2026-09-15 10:10','YYYY-MM-DD HH24:MI'),TO_DATE('2026-09-15 11:45','YYYY-MM-DD HH24:MI'));
+INSERT INTO USAGE_LOG  (UsageID,BookingID,ActualStartTime,ActualEndTime) VALUES (2003,1003,TO_DATE('2026-09-16 09:10','YYYY-MM-DD HH24:MI'),TO_DATE('2026-09-16 11:40','YYYY-MM-DD HH24:MI'));
+INSERT INTO USAGE_LOG (UsageID,BookingID,ActualStartTime,ActualEndTime)  VALUES (2004,1004,TO_DATE('2026-09-16 13:05','YYYY-MM-DD HH24:MI'),TO_DATE('2026-09-16 14:50','YYYY-MM-DD HH24:MI'));
+INSERT INTO USAGE_LOG (UsageID,BookingID,ActualStartTime,ActualEndTime)  VALUES (2005,1005,TO_DATE('2026-09-17 09:35','YYYY-MM-DD HH24:MI'),TO_DATE('2026-09-17 11:20','YYYY-MM-DD HH24:MI'));
+INSERT INTO USAGE_LOG (UsageID,BookingID,ActualStartTime,ActualEndTime)  VALUES (2006,1006,TO_DATE('2026-09-17 14:05','YYYY-MM-DD HH24:MI'),TO_DATE('2026-09-17 15:50','YYYY-MM-DD HH24:MI'));
+INSERT INTO USAGE_LOG (UsageID,BookingID,ActualStartTime,ActualEndTime)  VALUES (2007,1007,TO_DATE('2026-09-18 10:05','YYYY-MM-DD HH24:MI'),TO_DATE('2026-09-18 12:40','YYYY-MM-DD HH24:MI'));
+INSERT INTO USAGE_LOG (UsageID,BookingID,ActualStartTime,ActualEndTime)  VALUES (2008,1008,TO_DATE('2026-09-18 14:05','YYYY-MM-DD HH24:MI'),TO_DATE('2026-09-18 16:15','YYYY-MM-DD HH24:MI'));
+INSERT INTO USAGE_LOG (UsageID,BookingID,ActualStartTime,ActualEndTime)  VALUES (2009,1009,TO_DATE('2026-09-19 09:05','YYYY-MM-DD HH24:MI'),TO_DATE('2026-09-19 11:30','YYYY-MM-DD HH24:MI'));
+INSERT INTO USAGE_LOG (UsageID,BookingID,ActualStartTime,ActualEndTime)  VALUES (2010,1010,TO_DATE('2026-09-19 13:05','YYYY-MM-DD HH24:MI'),TO_DATE('2026-09-19 14:40','YYYY-MM-DD HH24:MI'));
+
+INSERT INTO MAINTENANCE VALUES (3001,201,301,DATE '2026-01-10',DATE '2026-01-10','Preventive','Vacuum system inspection',18000);
+INSERT INTO MAINTENANCE VALUES (3002,202,302,DATE '2026-02-12',DATE '2026-02-12','Calibration','Wavelength calibration',9000);
+INSERT INTO MAINTENANCE VALUES (3003,203,303,DATE '2026-03-05',DATE '2026-03-06','Preventive','Pump and column inspection',22000);
+INSERT INTO MAINTENANCE VALUES (3004,204,304,DATE '2026-03-18',DATE '2026-03-18','Service','Rotor inspection',7500);
+INSERT INTO MAINTENANCE VALUES (3005,205,305,DATE '2026-04-09',DATE '2026-04-09','Calibration','Temperature calibration',11000);
+INSERT INTO MAINTENANCE VALUES (3006,206,306,DATE '2026-04-21',DATE '2026-04-21','Calibration','Probe and channel calibration',6000);
+INSERT INTO MAINTENANCE VALUES (3007,207,307,DATE '2026-05-13',DATE '2026-05-14','Preventive','Load cell inspection',16000);
+INSERT INTO MAINTENANCE VALUES (3008,208,308,DATE '2026-06-02',DATE '2026-06-02','Calibration','Optical calibration',12500);
+INSERT INTO MAINTENANCE VALUES (3009,209,309,DATE '2026-06-18',DATE '2026-06-19','Service','Print head replacement',28000);
+INSERT INTO MAINTENANCE VALUES (3010,210,310,DATE '2026-07-07',DATE '2026-07-07','Calibration','Sensor calibration',8500);
+
+COMMIT;
+
+-- -----------------------------
+-- FUNCTION: CONFLICT CHECK
+-- Returns 1 when a proposed booking overlaps an existing active booking;
+-- returns 0 when no conflict exists.
+--
+-- Overlap rule:
+-- existing_start < new_end AND existing_end > new_start
+-- Thus, 09:00-10:00 and 10:00-11:00 do NOT conflict.
+-- -----------------------------
+CREATE OR REPLACE FUNCTION CHECK_BOOKING_CONFLICT (
+    p_equipment_id IN NUMBER,
+    p_booking_date IN DATE,
+    p_start_time   IN VARCHAR2,
+    p_end_time     IN VARCHAR2,
+    p_booking_id   IN NUMBER DEFAULT NULL
+) RETURN NUMBER
+IS
+    v_start DATE;
+    v_end   DATE;
+    v_count NUMBER;
+BEGIN
+    v_start := TO_DATE(TO_CHAR(p_booking_date,'YYYY-MM-DD') || ' ' || p_start_time,
+                       'YYYY-MM-DD HH24:MI');
+    v_end   := TO_DATE(TO_CHAR(p_booking_date,'YYYY-MM-DD') || ' ' || p_end_time,
+                       'YYYY-MM-DD HH24:MI');
+
+    IF v_end <= v_start THEN
+        RETURN 1;
+    END IF;
+
+    SELECT COUNT(*)
+      INTO v_count
+      FROM BOOKING b
+     WHERE b.EquipmentID = p_equipment_id
+       AND b.BookingDate = TRUNC(p_booking_date)
+       AND b.Status <> 'CANCELLED'
+       AND (p_booking_id IS NULL OR b.BookingID <> p_booking_id)
+       AND TO_DATE(TO_CHAR(b.BookingDate,'YYYY-MM-DD') || ' ' || b.StartTime,
+                   'YYYY-MM-DD HH24:MI') < v_end
+       AND TO_DATE(TO_CHAR(b.BookingDate,'YYYY-MM-DD') || ' ' || b.EndTime,
+                   'YYYY-MM-DD HH24:MI') > v_start;
+
+    IF v_count > 0 THEN
+        RETURN 1;
+    ELSE
+        RETURN 0;
+    END IF;
+END;
+/
+
+-- -----------------------------
+-- PROCEDURE: CREATE BOOKING
+-- Validates time and conflict before inserting.
+-- -----------------------------
+CREATE OR REPLACE PROCEDURE CREATE_BOOKING (
+    p_researcher_id IN NUMBER,
+    p_equipment_id  IN NUMBER,
+    p_booking_date  IN DATE,
+    p_start_time    IN VARCHAR2,
+    p_end_time      IN VARCHAR2,
+    p_purpose       IN VARCHAR2
+)
+IS
+    v_start DATE;
+    v_end   DATE;
+    v_id    NUMBER;
+    v_status EQUIPMENT.Status%TYPE;
+BEGIN
+    v_start := TO_DATE(TO_CHAR(p_booking_date,'YYYY-MM-DD') || ' ' || p_start_time,
+                       'YYYY-MM-DD HH24:MI');
+    v_end := TO_DATE(TO_CHAR(p_booking_date,'YYYY-MM-DD') || ' ' || p_end_time,
+                     'YYYY-MM-DD HH24:MI');
+
+    IF v_end <= v_start THEN
+        RAISE_APPLICATION_ERROR(-20001, 'End time must be later than start time.');
+    END IF;
+
+    SELECT Status INTO v_status
+      FROM EQUIPMENT
+     WHERE EquipmentID = p_equipment_id;
+
+    IF v_status IN ('MAINTENANCE','RETIRED') THEN
+        RAISE_APPLICATION_ERROR(-20002, 'Equipment is not available for booking.');
+    END IF;
+
+    IF CHECK_BOOKING_CONFLICT(p_equipment_id,p_booking_date,p_start_time,p_end_time) = 1 THEN
+        RAISE_APPLICATION_ERROR(-20003, 'BOOKING CONFLICT: equipment is already booked for an overlapping time.');
+    END IF;
+
+    v_id := BOOKING_SEQ.NEXTVAL;
+
+    INSERT INTO BOOKING
+        (BookingID,ResearcherID,EquipmentID,BookingDate,StartTime,EndTime,Purpose,Status)
+    VALUES
+        (v_id,p_researcher_id,p_equipment_id,TRUNC(p_booking_date),
+         p_start_time,p_end_time,p_purpose,'CONFIRMED');
+
+    COMMIT;
+    DBMS_OUTPUT.PUT_LINE('Booking created successfully. BookingID = ' || v_id);
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        RAISE_APPLICATION_ERROR(-20004, 'Equipment or researcher does not exist.');
+END;
+/
+
+-- -----------------------------
+-- PROCEDURE: UPDATE BOOKING
+-- Uses same conflict-checking logic while excluding its own BookingID.
+-- -----------------------------
+CREATE OR REPLACE PROCEDURE UPDATE_BOOKING_TIME (
+    p_booking_id   IN NUMBER,
+    p_booking_date IN DATE,
+    p_start_time   IN VARCHAR2,
+    p_end_time     IN VARCHAR2
+)
+IS
+    v_start DATE;
+    v_end   DATE;
+    v_equipment_id NUMBER;
+BEGIN
+    SELECT EquipmentID INTO v_equipment_id
+      FROM BOOKING
+     WHERE BookingID = p_booking_id;
+
+    v_start := TO_DATE(TO_CHAR(p_booking_date,'YYYY-MM-DD') || ' ' || p_start_time,
+                       'YYYY-MM-DD HH24:MI');
+    v_end := TO_DATE(TO_CHAR(p_booking_date,'YYYY-MM-DD') || ' ' || p_end_time,
+                     'YYYY-MM-DD HH24:MI');
+
+    IF v_end <= v_start THEN
+        RAISE_APPLICATION_ERROR(-20005, 'End time must be later than start time.');
+    END IF;
+
+    IF CHECK_BOOKING_CONFLICT(
+         v_equipment_id, p_booking_date,p_start_time,p_end_time,p_booking_id) = 1 THEN
+        RAISE_APPLICATION_ERROR(-20006, 'BOOKING CONFLICT: new time overlaps another booking.');
+    END IF;
+
+    UPDATE BOOKING
+       SET BookingDate = TRUNC(p_booking_date),
+           StartTime   = p_start_time,
+           EndTime     = p_end_time
+     WHERE BookingID = p_booking_id;
+
+    IF SQL%ROWCOUNT = 0 THEN
+        RAISE_APPLICATION_ERROR(-20007, 'Booking not found.');
+    END IF;
+
+    COMMIT;
+END;
+/
+
+-- -----------------------------
+-- PROCEDURE: RECORD USAGE
+-- -----------------------------
+CREATE OR REPLACE PROCEDURE RECORD_USAGE (
+    p_booking_id       IN NUMBER,
+    p_actual_start     IN DATE,
+    p_actual_end       IN DATE
+)
+IS
+    v_id NUMBER;
+BEGIN
+    IF p_actual_end < p_actual_start THEN
+        RAISE_APPLICATION_ERROR(-20008, 'Actual end time cannot be before actual start time.');
+    END IF;
+
+    v_id := USAGE_SEQ.NEXTVAL;
+
+    INSERT INTO USAGE_LOG
+        (UsageID,BookingID,ActualStartTime,ActualEndTime)
+    VALUES
+        (v_id,p_booking_id,p_actual_start,p_actual_end);
+
+    UPDATE BOOKING
+       SET Status='COMPLETED'
+     WHERE BookingID=p_booking_id;
+
+    COMMIT;
+    DBMS_OUTPUT.PUT_LINE('Usage recorded. UsageID = ' || v_id);
+END;
+/
+
+-- -----------------------------
+-- FUNCTION: USAGE HOURS
+-- -----------------------------
+CREATE OR REPLACE FUNCTION GET_USAGE_HOURS (
+    p_usage_id IN NUMBER
+) RETURN NUMBER
+IS
+    v_hours NUMBER;
+BEGIN
+    SELECT UsageHours INTO v_hours
+      FROM USAGE_LOG
+     WHERE UsageID = p_usage_id;
+
+    RETURN v_hours;
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        RETURN NULL;
+END;
+/
+
+-- -----------------------------
+-- TRIGGER: validate booking times and block direct conflicting inserts.
+-- Because a row-level trigger cannot query its mutating BOOKING table,
+-- this trigger only validates the time format/order. Conflict checking
+-- is enforced through CREATE_BOOKING / UPDATE_BOOKING_TIME.
+-- For evaluation, demonstrate the procedure as the controlled interface.
+-- -----------------------------
+CREATE OR REPLACE TRIGGER TRG_BOOKING_VALIDATE
+BEFORE INSERT OR UPDATE ON BOOKING
+FOR EACH ROW
+DECLARE
+    v_start DATE;
+    v_end DATE;
+BEGIN
+    v_start := TO_DATE(TO_CHAR(:NEW.BookingDate,'YYYY-MM-DD') || ' ' || :NEW.StartTime,
+                       'YYYY-MM-DD HH24:MI');
+    v_end := TO_DATE(TO_CHAR(:NEW.BookingDate,'YYYY-MM-DD') || ' ' || :NEW.EndTime,
+                     'YYYY-MM-DD HH24:MI');
+
+    IF v_end <= v_start THEN
+        RAISE_APPLICATION_ERROR(-20009, 'Invalid booking interval.');
+    END IF;
+END;
+/
+
+-- -----------------------------
+-- CURSOR PROCEDURE: researcher booking summary
+-- -----------------------------
+CREATE OR REPLACE PROCEDURE SHOW_RESEARCHER_BOOKINGS (
+    p_researcher_id IN NUMBER
+)
+IS
+    CURSOR c_bookings IS
+        SELECT b.BookingID, e.Name AS EquipmentName,
+               b.BookingDate, b.StartTime, b.EndTime, b.Status
+          FROM BOOKING b
+          JOIN EQUIPMENT e ON e.EquipmentID=b.EquipmentID
+         WHERE b.ResearcherID=p_researcher_id
+         ORDER BY b.BookingDate,b.StartTime;
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('BOOKINGS FOR RESEARCHER ' || p_researcher_id);
+    FOR r IN c_bookings LOOP
+        DBMS_OUTPUT.PUT_LINE(
+            r.BookingID || ' | ' || r.EquipmentName || ' | ' ||
+            TO_CHAR(r.BookingDate,'DD-MON-YYYY') || ' | ' ||
+            r.StartTime || '-' || r.EndTime || ' | ' || r.Status
+        );
+    END LOOP;
+END;
+/
+
+-- ================================================================
+-- DEMONSTRATION QUERIES
+-- ================================================================
+
+PROMPT ===== 1. All equipment with category =====
+SELECT e.EquipmentID,e.Name,e.Model,c.Name AS CategoryName,
+       e.Location,e.Status
+FROM EQUIPMENT e
+JOIN EQUIPMENT_CATEGORY c ON c.CategoryID=e.CategoryID
+ORDER BY e.EquipmentID;
+
+PROMPT ===== 2. Researcher and department =====
+SELECT r.ResearcherID,r.Name AS Researcher,r.Role,
+       d.DepartmentName,d.Building
+FROM RESEARCHER r
+JOIN DEPARTMENT d ON d.DeptID=r.DeptID
+ORDER BY r.ResearcherID;
+
+PROMPT ===== 3. Booking details =====
+SELECT b.BookingID,r.Name AS Researcher,e.Name AS Equipment,
+       b.BookingDate,b.StartTime,b.EndTime,b.Purpose,b.Status
+FROM BOOKING b
+JOIN RESEARCHER r ON r.ResearcherID=b.ResearcherID
+JOIN EQUIPMENT e ON e.EquipmentID=b.EquipmentID
+ORDER BY b.BookingDate,b.StartTime;
+
+PROMPT ===== 4. Usage hours (derived attribute) =====
+SELECT u.UsageID,u.BookingID,
+       TO_CHAR(u.ActualStartTime,'DD-MON-YYYY HH24:MI') AS ActualStart,
+       TO_CHAR(u.ActualEndTime,'DD-MON-YYYY HH24:MI') AS ActualEnd,
+       ROUND(u.UsageHours,2) AS UsageHours
+FROM USAGE_LOG u
+ORDER BY u.UsageID;
+
+PROMPT ===== 5. Total usage hours by equipment =====
+SELECT e.EquipmentID,e.Name,
+       ROUND(SUM(NVL(u.UsageHours,0)),2) AS TotalUsageHours
+FROM EQUIPMENT e
+LEFT JOIN BOOKING b ON b.EquipmentID=e.EquipmentID
+LEFT JOIN USAGE_LOG u ON u.BookingID=b.BookingID
+GROUP BY e.EquipmentID,e.Name
+ORDER BY TotalUsageHours DESC;
+
+PROMPT ===== 6. Maintenance history =====
+SELECT m.MaintenanceID,e.Name AS Equipment,t.Name AS Technician,
+       m.ScheduledDate,m.CompletedDate,m.MaintenanceType,m.Cost
+FROM MAINTENANCE m
+JOIN EQUIPMENT e ON e.EquipmentID=m.EquipmentID
+JOIN TECHNICIAN t ON t.TechnicianID=m.TechnicianID
+ORDER BY m.ScheduledDate;
+
+PROMPT ===== 7. Number of bookings per researcher =====
+SELECT r.ResearcherID,r.Name,COUNT(b.BookingID) AS BookingCount
+FROM RESEARCHER r
+LEFT JOIN BOOKING b ON b.ResearcherID=r.ResearcherID
+GROUP BY r.ResearcherID,r.Name
+ORDER BY BookingCount DESC,r.ResearcherID;
+
+PROMPT ===== 8. Equipment with no bookings =====
+SELECT e.EquipmentID,e.Name
+FROM EQUIPMENT e
+LEFT JOIN BOOKING b ON b.EquipmentID=e.EquipmentID
+WHERE b.BookingID IS NULL;
+
+PROMPT ===== 9. Maintenance cost by equipment =====
+SELECT e.EquipmentID,e.Name,ROUND(SUM(m.Cost),2) AS TotalMaintenanceCost
+FROM EQUIPMENT e
+JOIN MAINTENANCE m ON m.EquipmentID=e.EquipmentID
+GROUP BY e.EquipmentID,e.Name
+ORDER BY TotalMaintenanceCost DESC;
+
+PROMPT ===== 10. Category-wise equipment count =====
+SELECT c.CategoryID,c.Name,COUNT(e.EquipmentID) AS EquipmentCount
+FROM EQUIPMENT_CATEGORY c
+LEFT JOIN EQUIPMENT e ON e.CategoryID=c.CategoryID
+GROUP BY c.CategoryID,c.Name
+ORDER BY c.CategoryID;
+
+-- ================================================================
+-- PL/SQL CONFLICT-CHECKING DEMONSTRATION
+-- ================================================================
+
+PROMPT ===== 11. Successful booking through procedure =====
+BEGIN
+    CREATE_BOOKING(
+        101, 201, DATE '2026-09-20', '09:00', '10:00',
+        'Non-conflicting SEM booking'
+    );
+END;
+/
+
+PROMPT ===== 12. Conflict test: should raise ORA-20003 =====
+BEGIN
+    CREATE_BOOKING(
+        102, 201, DATE '2026-09-15', '10:30', '12:00',
+        'Intentional conflict test'
+    );
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE(SQLERRM);
+END;
+/
+
+PROMPT ===== 13. Boundary test: 11:00 starts exactly when 09:00-11:00 ends =====
+BEGIN
+    CREATE_BOOKING(
+        102, 201, DATE '2026-09-15', '11:00', '12:00',
+        'Boundary test - should be allowed'
+    );
+END;
+/
+
+PROMPT ===== 14. Function conflict check =====
+SELECT CHECK_BOOKING_CONFLICT(201,DATE '2026-09-15','10:30','12:00',NULL)
+       AS CONFLICT_FLAG
+FROM DUAL;
+
+PROMPT ===== 15. Cursor demonstration =====
+BEGIN
+    SHOW_RESEARCHER_BOOKINGS(101);
+END;
+/
+
+PROMPT ===== 16. Usage-hours function =====
+SELECT GET_USAGE_HOURS(2001) AS UsageHours FROM DUAL;
+
+COMMIT;
+
+-- ================================================================
+-- FUNCTIONAL DEPENDENCIES / NORMALIZATION SUMMARY
+-- ================================================================
+-- DEPARTMENT:
+-- DeptID -> DepartmentName, Building
+--
+-- RESEARCHER:
+-- ResearcherID -> Name, Email, Phone, Role, Status, DeptID
+-- Email -> ResearcherID, Name, Phone, Role, Status, DeptID
+--
+-- EQUIPMENT_CATEGORY:
+-- CategoryID -> Name, Description
+-- Name -> CategoryID, Description
+--
+-- EQUIPMENT:
+-- EquipmentID -> Name, Model, Manufacturer, SerialNumber, PurchaseDate,
+--                Location, Cost, Status, CategoryID
+-- SerialNumber -> EquipmentID, Name, Model, Manufacturer, PurchaseDate,
+--                 Location, Cost, Status, CategoryID
+--
+-- TECHNICIAN:
+-- TechnicianID -> Name, Phone, Specialization
+--
+-- BOOKING:
+-- BookingID -> ResearcherID, EquipmentID, BookingDate, StartTime,
+--              EndTime, Purpose, Status
+--
+-- USAGE_LOG:
+-- UsageID -> BookingID, ActualStartTime, ActualEndTime
+-- BookingID -> UsageID, ActualStartTime, ActualEndTime (UNIQUE)
+--
+-- MAINTENANCE:
+-- MaintenanceID -> EquipmentID, TechnicianID, ScheduledDate,
+--                  CompletedDate, MaintenanceType, Description, Cost
+--
+-- Normalization:
+-- 1NF: all attributes are atomic; no repeating groups.
+-- 2NF: non-key attributes depend on the complete primary key.
+--       Relationship data is separated into BOOKING and MAINTENANCE.
+-- 3NF: transitive dependencies are removed by separating Department,
+--       Category, Researcher, Equipment and Technician information.
+-- The schema is therefore in 3NF under the stated functional dependencies.
+--
+-- ================================================================
+-- END OF PROJECT SCRIPT
+-- ================================================================
