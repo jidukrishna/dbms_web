@@ -1,8 +1,10 @@
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
-from db import run_query
+from db import run_query, render_sidebar_reset
 import io
 import datetime
+
+render_sidebar_reset()
 
 st.title("🧾 Booking Receipt Generator")
 st.caption("Generate an official lab booking receipt image and export as PNG.")
@@ -70,7 +72,7 @@ if df is not None and not df.empty:
             draw.text((25, y), line, fill="#111111", font=font)
             y += 22
 
-        st.image(img, caption=f"Receipt #{row['BOOKINGID']}", use_column_width=False)
+        st.image(img, caption=f"Receipt #{row['BOOKINGID']}", use_container_width=False)
 
         buf = io.BytesIO()
         img.save(buf, format="PNG")

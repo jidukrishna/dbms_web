@@ -1,6 +1,8 @@
 import streamlit as st
 import datetime
-from db import run_query, run_dml
+from db import run_query, run_dml, render_sidebar_reset
+
+render_sidebar_reset()
 
 st.title("⚙️ Equipment Management")
 

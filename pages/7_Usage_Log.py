@@ -1,11 +1,15 @@
 import streamlit as st
 import datetime
-from db import run_query, run_dml
+from db import run_query, call_proc, call_func, render_sidebar_reset
 
-st.title("⏱️ Equipment Usage Logging")
-st.caption("Track actual equipment usage time. Notice that UsageHours is a derived/virtual column calculated by Oracle.")
+render_sidebar_reset()
 
-# READ
+st.title("⏱️ Equipment Usage Logging & PL/SQL Routines")
+st.caption("Demonstrating RECORD_USAGE stored procedure and GET_USAGE_HOURS stored function.")
+
+tab_log, tab_calc = st.tabs(["📝 Record Usage (RECORD_USAGE)", "🔢 Query Hours (GET_USAGE_HOURS)"])
+
+# READ DATA
 try:
     df = run_query("""
         SELECT u.UsageID, u.BookingID, r.Name AS Researcher, e.Name AS Equipment,
@@ -18,13 +22,13 @@ try:
         JOIN EQUIPMENT e ON e.EquipmentID = b.EquipmentID
         ORDER BY u.UsageID DESC
     """)
-    st.subheader("Usage Records")
+    st.subheader("Usage Log Table")
     st.dataframe(df, use_container_width=True)
 except Exception as e:
     st.error(f"Failed to fetch usage logs: {e}")
     df = None
 
-# Available bookings for logging (filter bookings that are not cancelled)
+# Available bookings for logging
 try:
     bookings = run_query("""
         SELECT b.BookingID, r.Name AS Researcher, e.Name AS Equipment,
@@ -32,63 +36,62 @@ try:
         FROM BOOKING b
         JOIN RESEARCHER r ON r.ResearcherID = b.ResearcherID
         JOIN EQUIPMENT e ON e.EquipmentID = b.EquipmentID
-        WHERE b.Status <> 'CANCELLED'
+        WHERE b.Status IN ('CONFIRMED', 'COMPLETED')
+          AND b.BookingID NOT IN (SELECT BookingID FROM USAGE_LOG)
         ORDER BY b.BookingDate DESC, b.BookingID DESC
     """)
     b_map = {
         row["BOOKINGID"]: f"Booking #{row['BOOKINGID']}: {row['RESEARCHER']} ({row['EQUIPMENT']}) on {row['BDATE']}"
         for _, row in bookings.iterrows()
     } if bookings is not None and not bookings.empty else {}
-except Exception as e:
+except Exception:
     bookings = None
     b_map = {}
 
-# CREATE LOG
-st.subheader("Record Equipment Usage")
-default_start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-default_end = (datetime.datetime.now() + datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
+# TAB 1: RECORD USAGE PROCEDURE
+with tab_log:
+    st.subheader("Record Equipment Usage via RECORD_USAGE Procedure")
 
-with st.form("log_usage"):
     if bookings is not None and not bookings.empty:
-        booking_id = st.selectbox(
-            "Select Booking",
+        selected_booking = st.selectbox(
+            "Select Unlogged Booking",
             options=list(bookings["BOOKINGID"]),
             format_func=lambda x: b_map.get(x, f"Booking #{x}")
         )
-    else:
-        booking_id = None
-        st.warning("No active bookings found.")
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            start_d = st.date_input("Actual Start Date", value=datetime.date.today(), key="start_d")
+            start_t = st.time_input("Actual Start Time", value=datetime.time(9, 5), key="start_t")
+        with col_s2:
+            end_d = st.date_input("Actual End Date", value=datetime.date.today(), key="end_d")
+            end_t = st.time_input("Actual End Time", value=datetime.time(11, 45), key="end_t")
 
-    start_dt = st.text_input("Actual Start (YYYY-MM-DD HH:MM)", value=default_start)
-    end_dt = st.text_input("Actual End (YYYY-MM-DD HH:MM, optional)", value=default_end)
-
-    if st.form_submit_button("Record Usage"):
-        if booking_id is None:
-            st.warning("Please select a valid booking.")
-        elif not start_dt:
-            st.warning("Actual Start time is required.")
-        else:
+        if st.button("Submit Usage (RECORD_USAGE)", type="primary"):
+            dt_start = datetime.datetime.combine(start_d, start_t)
+            dt_end = datetime.datetime.combine(end_d, end_t)
             try:
-                # If end_dt is provided, insert with end time; else insert with NULL
-                if end_dt.strip():
-                    run_dml("""
-                        INSERT INTO USAGE_LOG (UsageID, BookingID, ActualStartTime, ActualEndTime)
-                        VALUES (USAGE_SEQ.NEXTVAL, :1,
-                                TO_DATE(:2, 'YYYY-MM-DD HH24:MI'),
-                                TO_DATE(:3, 'YYYY-MM-DD HH24:MI'))
-                    """, [int(booking_id), start_dt.strip(), end_dt.strip()])
-                else:
-                    run_dml("""
-                        INSERT INTO USAGE_LOG (UsageID, BookingID, ActualStartTime, ActualEndTime)
-                        VALUES (USAGE_SEQ.NEXTVAL, :1,
-                                TO_DATE(:2, 'YYYY-MM-DD HH24:MI'), NULL)
-                    """, [int(booking_id), start_dt.strip()])
-
-                # Optionally update booking status to COMPLETED
-                run_dml("UPDATE BOOKING SET Status = 'COMPLETED' WHERE BookingID = :1", [int(booking_id)])
-
-                st.success("Usage recorded successfully! UsageHours automatically computed.")
+                call_proc("RECORD_USAGE", [int(selected_booking), dt_start, dt_end])
+                st.success(f"Usage for Booking #{selected_booking} recorded via RECORD_USAGE procedure! Status updated to COMPLETED.")
                 st.rerun()
             except Exception as e:
-                st.error(f"Error recording usage: {e}")
+                st.error(f"PL/SQL Exception: {e}")
+    else:
+        st.info("All current bookings have already been logged, or no bookings exist.")
 
+# TAB 2: GET_USAGE_HOURS FUNCTION
+with tab_calc:
+    st.subheader("Verify Usage Hours using GET_USAGE_HOURS Function")
+    if df is not None and not df.empty:
+        calc_usage_id = st.selectbox(
+            "Select Usage Record",
+            options=list(df["USAGEID"]),
+            format_func=lambda x: f"UsageID #{x} (Booking #{df.set_index('USAGEID').loc[x, 'BOOKINGID']})"
+        )
+        if st.button("Call GET_USAGE_HOURS Function"):
+            try:
+                hours = call_func("GET_USAGE_HOURS", float, [int(calc_usage_id)])
+                st.success(f"🎯 Function `GET_USAGE_HOURS({calc_usage_id})` returned: **{hours:.2f} hours**")
+            except Exception as e:
+                st.error(f"Error executing function: {e}")
+    else:
+        st.info("No usage records available.")

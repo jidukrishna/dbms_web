@@ -14,7 +14,7 @@ The project combines an **Oracle Database** backend (with PL/SQL procedures, tri
 - **Database Driver**: `python-oracledb` (Pure Python Thin mode, connecting to Oracle 23ai / 19c / 21c)
 - **Data Manipulation**: `pandas`
 - **Image Generation / Export**: `Pillow` (PIL)
-- **Language**: Python 3.10+
+- **Language & Runtime**: Python 3.10+ / Linux / Docker Oracle Free Container
 
 ---
 
@@ -23,11 +23,12 @@ The project combines an **Oracle Database** backend (with PL/SQL procedures, tri
 ```
 dbms_web/
 ├── app.py                      # Main dashboard: KPIs, metrics, and navigation
-├── db.py                       # Oracle DB connection pool, run_query & run_dml helpers
+├── db.py                       # Oracle DB connection pool, run_query, run_dml, call_proc, call_func
 ├── requirements.txt            # Python dependencies
 ├── docs.md                     # Comprehensive project documentation & changelog
 ├── project_simple.md           # Implementation blueprint and presentation notes
 ├── new.txt                     # Oracle SQL/PL-SQL schema DDL, DML sample data, and procedures
+├── venv/                       # Dedicated Python virtual environment
 ├── .streamlit/
 │   └── secrets.toml            # Oracle credentials (user, password, DSN)
 └── pages/
@@ -36,8 +37,8 @@ dbms_web/
     ├── 3_Equipment_Category.py # Equipment Category CRUD
     ├── 4_Equipment.py          # Equipment Inventory CRUD (with Category FK & Status check)
     ├── 5_Technician.py         # Technician CRUD
-    ├── 6_Booking.py            # Booking scheduling via PL/SQL CREATE_BOOKING & conflict checks
-    ├── 7_Usage_Log.py          # Actual usage recording & virtual column UsageHours display
+    ├── 6_Booking.py            # Booking scheduling (CREATE_BOOKING, CHECK_BOOKING_CONFLICT, UPDATE_BOOKING_TIME, SHOW_RESEARCHER_BOOKINGS)
+    ├── 7_Usage_Log.py          # Actual usage recording (RECORD_USAGE procedure & GET_USAGE_HOURS function)
     ├── 8_Maintenance.py       # Maintenance scheduling and cost tracking
     └── 9_Receipt.py           # Digital booking receipt generator using Pillow
 ```
@@ -125,7 +126,9 @@ The database design models the lab booking domain and is normalized to **Third N
 
 ---
 
-## 5. PL/SQL Logic & Stored Routines
+## 5. PL/SQL Stored Procedures & Functions
+
+The application interacts with all six core PL/SQL procedures and functions defined in `new.txt`:
 
 ### 5.1 `CHECK_BOOKING_CONFLICT` (Function)
 Validates whether a proposed booking interval overlaps with an existing booking for the same equipment on the same date:
@@ -138,9 +141,10 @@ FUNCTION CHECK_BOOKING_CONFLICT(
     p_booking_id   IN NUMBER DEFAULT NULL
 ) RETURN NUMBER;
 ```
-- **Overlap Logic**: `existing_start < new_end AND existing_end > new_start`.
+- **Overlap Formula**: `existing_start < new_end AND existing_end > new_start`.
 - Excludes cancelled bookings (`Status <> 'CANCELLED'`).
-- Returns `1` if a conflict is detected, `0` if time slot is clear.
+- Returns `1` if a conflict exists, `0` if available.
+- Used in `6_Booking.py` via the "Test Slot" interactive button (`call_func`).
 
 ### 5.2 `CREATE_BOOKING` (Procedure)
 Controlled entry point for inserting reservations:
@@ -148,14 +152,52 @@ Controlled entry point for inserting reservations:
 2. Verifies equipment status is not `'MAINTENANCE'` or `'RETIRED'` (raises `ORA-20002`).
 3. Invokes `CHECK_BOOKING_CONFLICT`; if conflict exists, raises `ORA-20003`.
 4. Allocates `BOOKING_SEQ.NEXTVAL` and inserts the booking with `'CONFIRMED'` status.
+- Used in `6_Booking.py` via `call_proc("CREATE_BOOKING", [...])`.
 
 ### 5.3 `UPDATE_BOOKING_TIME` (Procedure)
-Allows rescheduling an existing reservation while excluding the current `BookingID` from conflict detection.
+Allows rescheduling an existing reservation while excluding the current `BookingID` from self-conflict checks:
+```sql
+PROCEDURE UPDATE_BOOKING_TIME(
+    p_booking_id   IN NUMBER,
+    p_booking_date IN DATE,
+    p_start_time   IN VARCHAR2,
+    p_end_time     IN VARCHAR2
+);
+```
+- Used in `6_Booking.py` in the "Reschedule" tab (`call_proc`).
 
 ### 5.4 `RECORD_USAGE` (Procedure)
-Records actual execution times in `USAGE_LOG` and updates the associated `BOOKING.Status` to `'COMPLETED'`.
+```sql
+PROCEDURE RECORD_USAGE(
+    p_booking_id   IN NUMBER,
+    p_actual_start IN DATE,
+    p_actual_end   IN DATE
+);
+```
+- Validates that `ActualEndTime >= ActualStartTime`.
+- Automatically draws `USAGE_SEQ.NEXTVAL` and inserts record into `USAGE_LOG`.
+- Updates the corresponding `BOOKING.Status` to `'COMPLETED'`.
+- Used in `7_Usage_Log.py` in the "Record Usage" tab (`call_proc`).
 
-### 5.5 `TRG_BOOKING_VALIDATE` (Trigger)
+### 5.5 `GET_USAGE_HOURS` (Function)
+```sql
+FUNCTION GET_USAGE_HOURS(
+    p_usage_id IN NUMBER
+) RETURN NUMBER;
+```
+- Queries the Oracle virtual column `UsageHours` for a given `UsageID`.
+- Used in `7_Usage_Log.py` in the "Query Hours" tab (`call_func`).
+
+### 5.6 `SHOW_RESEARCHER_BOOKINGS` (Cursor Procedure)
+```sql
+PROCEDURE SHOW_RESEARCHER_BOOKINGS(
+    p_researcher_id IN NUMBER
+);
+```
+- Uses a PL/SQL explicit cursor to loop through all bookings for a given researcher and outputs formatted strings via `DBMS_OUTPUT.PUT_LINE`.
+- Captured in `db.py` via `call_proc_with_output` and rendered in `6_Booking.py` inside a code block.
+
+### 5.7 `TRG_BOOKING_VALIDATE` (Trigger)
 Ensures format validity and start/end time ordering directly on the `BOOKING` table at row level.
 
 ---
@@ -165,6 +207,8 @@ Ensures format validity and start/end time ordering directly on the `BOOKING` ta
 ### 6.1 `app.py` (Dashboard)
 - **Top KPIs**: Displays live metrics for `Total Equipment`, `Active Bookings`, and `Researchers`.
 - **System Overview**: Categorized modules overview (Core Entities, Operations, Tracking).
+- **Database Administration**: Features the `🔄 Auto-Reset Everything with new.txt` button to drop and re-seed the entire Oracle database on demand.
+- **Global Sidebar Reset**: Persistent reset button in the sidebar across all pages.
 
 ### 6.2 `pages/1_Department.py`
 - Complete CRUD for `DEPARTMENT`.
@@ -193,24 +237,21 @@ Ensures format validity and start/end time ordering directly on the `BOOKING` ta
 - Technician contact and specialization tracking.
 
 ### 6.7 `pages/6_Booking.py` (Core Feature)
-- Displays all existing bookings with joined researcher and equipment names.
-- Reservation form featuring:
-  - Active researchers dropdown
-  - Available equipment dropdown
-  - Date and time pickers
-- Calls `CREATE_BOOKING` stored procedure directly via `cur.callproc()`.
-- Catches and displays Oracle PL/SQL exceptions (such as `ORA-20003: BOOKING CONFLICT`).
-- Fast status actions: Cancel booking or mark as completed.
+Organized into 4 tabs:
+1. **📋 All Bookings**: View current reservations and perform quick cancel/complete actions.
+2. **➕ Create Booking**: Interactive slot availability testing (`CHECK_BOOKING_CONFLICT`) and reservation creation via `CREATE_BOOKING`.
+3. **⏰ Reschedule**: Update booking dates and time slots via `UPDATE_BOOKING_TIME`.
+4. **🔍 Researcher Schedule**: View formatted schedule output retrieved from `SHOW_RESEARCHER_BOOKINGS` via `DBMS_OUTPUT`.
 
 ### 6.8 `pages/7_Usage_Log.py`
-- Displays usage records with Oracle-calculated `UsageHours` (virtual column).
-- Form to record actual start and end times for any confirmed booking.
-- Automatic transition of booking status to `'COMPLETED'` upon usage recording.
+Organized into 2 tabs:
+1. **📝 Record Usage**: Select unlogged bookings and invoke `RECORD_USAGE` procedure with automatic status transition to `'COMPLETED'`.
+2. **🔢 Query Hours**: Select any usage log and query computed hours using `GET_USAGE_HOURS` function.
 
 ### 6.9 `pages/8_Maintenance.py`
 - Equipment maintenance scheduling and logging.
-- Sequence-based auto-incrementing `MaintenanceID`.
-- Technician assignment and cost tracking.
+- Sequence-based auto-incrementing `MaintenanceID` (`MAINTENANCE_SEQ.NEXTVAL`).
+- Technician assignment, maintenance type categorization, and cost tracking.
 
 ### 6.10 `pages/9_Receipt.py`
 - Select any booking to preview its details.
@@ -223,63 +264,66 @@ Ensures format validity and start/end time ordering directly on the `BOOKING` ta
 
 ### 7.1 Prerequisites
 - Python 3.10+
-- Oracle Database (Oracle XE, Free 23ai, or Enterprise Edition)
+- Oracle Database 23ai / Free Container running locally on port 1521
 
-### 7.2 Database Setup
-Execute the SQL script in Oracle SQL*Plus, SQL Developer, or SQLcl:
+### 7.2 Database Verification
+Ensure the Oracle container is running and healthy:
 ```bash
-sqlplus system/YourPassword123@localhost:1521/FREEPDB1 @new.txt
+docker ps
 ```
-This script creates all tables, constraints, virtual columns, sequences, procedures, triggers, and sample data.
+The database credentials configured in `.streamlit/secrets.toml`:
+```toml
+[oracle]
+user = "system"
+password = "YourPassword123"
+dsn = "localhost:1521/FREEPDB1"
+```
 
-### 7.3 Python Environment Setup
-1. Create and activate a virtual environment:
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Configure Oracle connection secrets in `.streamlit/secrets.toml`:
-   ```toml
-   [oracle]
-   user = "system"
-   password = "YourPassword123"
-   dsn = "localhost:1521/FREEPDB1"
-   ```
+### 7.3 Virtual Environment Setup
+The project includes a dedicated virtual environment `venv/`:
+```bash
+# Activate the virtual environment
+source venv/bin/activate
+
+# (Optional) Verify dependencies
+pip list
+```
 
 ### 7.4 Running the Application
-Launch the Streamlit web app:
+Launch the Streamlit web application:
 ```bash
 streamlit run app.py
 ```
-Open your browser at `http://localhost:8501`.
+Or directly without activation:
+```bash
+./venv/bin/streamlit run app.py
+```
+Access the application in your browser at:
+`http://localhost:8501`
 
 ---
 
 ## 8. Enhancements & Adaptations Made (Changelog)
 
-In accordance with user requirements, the following improvements and refinements were introduced relative to the original outline in `project_simple.md`:
-
-1. **Defensive Data Handling for Empty Tables**:
-   - In `project_simple.md`, `selected = st.selectbox(..., df["DEPTID"])` would raise an uncaught `KeyError` / `IndexError` if the table had no records.
-   - Guard conditions (`if df is not None and not df.empty:`) were added to all pages to gracefully handle empty initial states.
-
-2. **Cursor Lifecycle Management**:
-   - In `db.py`, `run_dml` and the procedure call in `6_Booking.py` now ensure `cur.close()` is executed inside a `finally` block, preventing cursor leaks in long-running sessions.
-
-3. **Oracle Column Case Sensitivity Compatibility**:
-   - Oracle returns unquoted identifiers in uppercase (`DEPTID`, `RESEARCHERID`, `NAME`, `EQUIPMENTID`, `STATUS`).
-   - All DataFrame column references and join queries have been aligned to standard uppercase dictionary keys.
-
-4. **Enhanced Foreign-Key Selectboxes**:
-   - Rather than displaying bare IDs, foreign key dropdowns format options with human-readable labels (e.g., `101 - Anita Nair` instead of just `101`).
-
-5. **Receipt Styling & PNG Export**:
-   - In `9_Receipt.py`, image dimensions, framing borders, generation timestamps, and custom receipt headers were added to provide a clean presentation-ready artifact.
-
-6. **Graceful Database Exception Messages**:
-   - All DML and PL/SQL calls are wrapped with informative `st.error()` and `st.success()` banners rather than allowing raw traceback screens to crash the presentation view.
-
+1. **Full Integration of PL/SQL Routines**:
+   - Expanded beyond simple inserts to natively integrate all 6 procedures and functions (`CREATE_BOOKING`, `CHECK_BOOKING_CONFLICT`, `UPDATE_BOOKING_TIME`, `RECORD_USAGE`, `GET_USAGE_HOURS`, and `SHOW_RESEARCHER_BOOKINGS`).
+2. **DBMS_OUTPUT Capture**:
+   - Implemented `call_proc_with_output` in `db.py` to capture and render buffer output from `SHOW_RESEARCHER_BOOKINGS` directly in Streamlit.
+3. **Tabbed Navigation in Booking & Usage**:
+   - Modularized `6_Booking.py` and `7_Usage_Log.py` into distinct tabs for creating, rescheduling, inspecting schedules, and querying calculated hours.
+4. **Defensive Data Handling**:
+   - Guard conditions prevent `KeyError` or `IndexError` when tables or query results are initially empty.
+5. **Cursor Lifecycle Management**:
+   - All `run_dml`, `call_proc`, and `call_func` methods execute `cur.close()` in `finally` blocks to guarantee no cursor leakage.
+6. **Enhanced Foreign-Key Selectboxes**:
+   - Foreign key selectboxes format records with informative labels (e.g., `101 - Anita Nair`).
+7. **Pillow Receipt Generation**:
+   - Formatted graphic receipt slip with borders, timestamps, and one-click PNG download.
+8. **Automated One-Click Database Reset Engine (`new.txt`)**:
+   - Built `reset_database_from_file(filepath)` and `render_sidebar_reset()` in `db.py`.
+   - Dual-engine execution:
+     - **Primary Engine**: Native Oracle SQL*Plus execution inside the container runtime (`podman`/`docker`), preserving exact script fidelity, formatting, sequences, and procedure compilation.
+     - **Fallback Engine**: Pure-Python DBAPI parser that executes the 100+ SQL statements and 20+ PL/SQL blocks directly via `oracledb` connection.
+   - User Interface:
+     - **Dashboard Card in `app.py`**: Large `🔄 Auto-Reset Everything with new.txt` button with live progress spinner and expander showing execution logs.
+     - **Global Sidebar Control**: Persistent `🔄 Auto-Reset DB (new.txt)` button in the sidebar of `app.py` and all 9 sub-pages for instant test re-seeding.
